@@ -4,7 +4,7 @@ import requests
 import logging
 import json
 import time
-from threading import Lock
+from threading import Lock, Thread, Event
 from pwnagotchi.plugins import Plugin
 from pwnagotchi.ui.components import LabeledValue
 from pwnagotchi.ui.view import BLACK
@@ -13,24 +13,29 @@ import pwnagotchi.ui.fonts as fonts
 
 class GpuCrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '2.1.0'
+    __version__ = '2.3.0'
     __license__ = 'GPL3'
     __description__ = (
         'Sends uncracked handshakes to a GPU cracking server on your PC via USB gadget. '
         'Shows hashcat status on the display.'
     )
 
-    POTFILE_PATH = '/root/handshakes/cracked.pwngpu.potfile'
-    STATUS_PATH  = '/root/handshakes/.pwngpu_crack_status.json'
-
-    USB_IFACE   = 'usb0'
-    USB_GATEWAY = '10.0.0.1'
+    POTFILE_PATH  = '/root/handshakes/cracked.pwngpu.potfile'
+    STATUS_PATH   = '/root/handshakes/.pwngpu_crack_status.json'
+    USB_IFACE     = 'usb0'
+    USB_OWN_IP    = '10.0.0.2'   # pwnagotchi's static IP on the USB link
+    USB_GATEWAY   = '10.0.0.1'   # PC's IP — where the crack server lives
+    POLL_INTERVAL = 60            # seconds between background USB checks
 
     def __init__(self):
-        self.lock      = Lock()
-        self.last_run  = 0
-        self.sent      = set()
-        self._status   = 'waiting'   # internal state string
+        self.lock         = Lock()
+        self.last_run     = 0
+        self.sent         = set()
+        self.ui_status    = 'GPU: waiting'
+        self._status      = 'waiting'
+        self._agent       = None
+        self._stop_event  = Event()
+        self._poll_thread = None
         self._load_status()
 
     # ------------------------------------------------------------------ #
@@ -38,25 +43,6 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def _set_status(self, state: str, detail: str = ''):
-        """
-        Central status setter.  All display text is built here so the
-        on-screen label is always consistent with the internal state.
-
-        States
-        ------
-        waiting        – plugin idle, USB not yet checked
-        no_usb         – USB interface down / no IP
-        connecting     – about to ping the server
-        offline        – server did not respond to /health
-        online         – server is up, nothing to do right now
-        scanning       – listing pcap files in handshake dir
-        uploading N    – sending N file(s) to the server
-        cracking NAME  – server accepted NAME, hashcat running
-        cracked N      – N password(s) found (shown briefly)
-        no_match       – server finished, nothing cracked
-        results N      – polling /results; N total in server pot
-        error MSG      – something went wrong
-        """
         self._status = state
         label_map = {
             'waiting':    'GPU: waiting',
@@ -65,8 +51,8 @@ class GpuCrack(Plugin):
             'offline':    'GPU: offline',
             'online':     'GPU: online',
             'scanning':   'GPU: scanning',
-            'uploading':  f'GPU: uploading {detail}',
-            'cracking':   f'GPU: cracking {detail}',
+            'uploading':  f'GPU: up {detail}',
+            'cracking':   f'GPU: crack {detail}',
             'cracked':    f'GPU: {detail} cracked!',
             'no_match':   'GPU: no match',
             'results':    f'GPU: {detail} total',
@@ -80,20 +66,79 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def on_loaded(self):
-        missing = [f for f in ('api_key',) if not self.options.get(f)]
-        if missing:
-            logging.error(f"[pwngpu] Missing config fields: {missing}")
+        if not self.options.get('api_key'):
+            logging.error("[pwngpu] Missing required config field: api_key")
             return
         self._set_status('waiting')
-        logging.info("[pwngpu] Plugin loaded.")
+        self._stop_event.clear()
+        self._poll_thread = Thread(target=self._poller, daemon=True, name='pwngpu-poll')
+        self._poll_thread.start()
+        logging.info("[pwngpu] Plugin loaded, poller started.")
 
     def on_unload(self, ui):
+        self._stop_event.set()
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
         with ui._lock:
             try:
                 ui.remove_element('pwngpu_crack_status')
             except KeyError:
                 pass
         logging.info("[pwngpu] Plugin unloaded.")
+
+    # ------------------------------------------------------------------ #
+    #  Background poller                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _poller(self):
+        """
+        Lightweight daemon thread. Wakes every POLL_INTERVAL seconds.
+
+        While the pwnagotchi is in the field (USB down):
+          - One subprocess call to check usb0 → returns immediately → sleeps.
+          - No HTTP traffic, no file I/O, negligible battery impact.
+
+        While tethered to the PC (USB up):
+          - During cooldown: only checks USB, skips HTTP ping.
+            Display stays on last meaningful status (online/results/etc.).
+          - When cooldown elapsed: triggers a full _run() sync.
+        """
+        # Short initial delay so on_epoch/on_internet_available have a
+        # chance to store self._agent before the poller first tries to use it.
+        self._stop_event.wait(15)
+
+        while not self._stop_event.is_set():
+            try:
+                self._poll_tick()
+            except Exception as e:
+                logging.error(f"[pwngpu] poller error: {e}")
+            self._stop_event.wait(self.POLL_INTERVAL)
+
+    def _poll_tick(self):
+        # Always check USB — cheap subprocess, updates display if down.
+        if not self._usb_connected():
+            return
+
+        # USB is up. If we have no agent yet, show 'connecting' so the
+        # user knows the plugin is alive but not ready yet.
+        if self._agent is None:
+            self._set_status('connecting')
+            return
+
+        sleep = self.options.get('sleep', 1800)
+        elapsed = time.time() - self.last_run
+
+        # During cooldown: USB is up but we don't ping the server.
+        # The display already shows the result of the last sync —
+        # leave it alone to avoid flickering between 'connecting' and
+        # the real status on every poll tick.
+        if elapsed < sleep:
+            return
+
+        # Cooldown elapsed — trigger a full sync if nothing is running.
+        if not self.lock.locked():
+            self._run(self._agent)
+            self.last_run = time.time()
 
     # ------------------------------------------------------------------ #
     #  UI                                                                  #
@@ -130,6 +175,8 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def on_handshake(self, agent, filename, access_point, client_station):
+        """New handshake — always upload immediately, bypass cooldown."""
+        self._agent = agent
         if not self._usb_connected():
             return
         if self.lock.locked():
@@ -139,17 +186,14 @@ class GpuCrack(Plugin):
         self.last_run = time.time()
 
     def on_internet_available(self, agent):
-        if not self._usb_connected():
-            return
-        if self.lock.locked():
-            return
-        sleep = self.options.get('sleep', 1800)
-        if time.time() - self.last_run < sleep:
-            return
-        self._run(agent)
-        self.last_run = time.time()
+        self._maybe_run(agent)
 
     def on_epoch(self, agent, epoch, epoch_data):
+        self._maybe_run(agent)
+
+    def _maybe_run(self, agent):
+        """Store agent reference; trigger a sync if cooldown has elapsed."""
+        self._agent = agent
         if not self._usb_connected():
             return
         if self.lock.locked():
@@ -161,16 +205,22 @@ class GpuCrack(Plugin):
         self.last_run = time.time()
 
     # ------------------------------------------------------------------ #
-    #  USB gadget detection                                                #
+    #  USB detection                                                       #
     # ------------------------------------------------------------------ #
 
     def _usb_connected(self):
+        """
+        Returns True if usb0 is up and has the expected static IP (10.0.0.2).
+        Checking for the exact IP guards against a misconfigured interface
+        that has some other address and would silently fail to reach the PC.
+        Single subprocess call — the only cost while in the field.
+        """
         try:
             result = subprocess.run(
                 ['ip', 'addr', 'show', self.USB_IFACE],
                 capture_output=True, text=True, timeout=3
             )
-            if result.returncode != 0 or 'inet ' not in result.stdout:
+            if result.returncode != 0 or f'inet {self.USB_OWN_IP}' not in result.stdout:
                 self._set_status('no_usb')
                 return False
             return True
@@ -180,7 +230,6 @@ class GpuCrack(Plugin):
             return False
 
     def _get_server_url(self):
-        #TODO: allow separate config for local vs remote server URL (e.g. for LAN vs WAN use)
         url = self.options.get('server_url', '').rstrip('/')
         if not url:
             port = self.options.get('port', 6881)
@@ -192,15 +241,16 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def _load_status(self):
-        if os.path.exists(self.STATUS_PATH):
-            try:
-                with open(self.STATUS_PATH, 'r') as f:
-                    data = json.load(f)
-                    self.sent = set(data.get('sent', []))
-                logging.debug(f"[pwngpu] Loaded {len(self.sent)} previously sent entries.")
-            except Exception as e:
-                logging.warning(f"[pwngpu] Could not load status: {e}")
-                self.sent = set()
+        if not os.path.exists(self.STATUS_PATH):
+            return
+        try:
+            with open(self.STATUS_PATH, 'r') as f:
+                data = json.load(f)
+                self.sent = set(data.get('sent', []))
+            logging.debug(f"[pwngpu] Loaded {len(self.sent)} previously sent entries.")
+        except Exception as e:
+            logging.warning(f"[pwngpu] Could not load status: {e}")
+            self.sent = set()
 
     def _save_status(self):
         try:
@@ -210,7 +260,7 @@ class GpuCrack(Plugin):
             logging.warning(f"[pwngpu] Could not save status: {e}")
 
     # ------------------------------------------------------------------ #
-    #  Core logic                                                          #
+    #  Core sync logic                                                     #
     # ------------------------------------------------------------------ #
 
     def _run(self, agent):
@@ -230,7 +280,7 @@ class GpuCrack(Plugin):
 
             self._set_status('online')
 
-            # 2. Scan handshake directory
+            # 2. Scan for unsent pcaps
             self._set_status('scanning')
             pcaps = [
                 f for f in os.listdir(handshake_dir)
@@ -244,25 +294,22 @@ class GpuCrack(Plugin):
                 self._fetch_and_save_results(server_url, api_key)
                 return
 
-            # 3. Upload loop
+            # 3. Convert and upload
             total_new = 0
             logging.info(f"[pwngpu] {len(pcaps)} new pcap(s) to send.")
-            self._set_status('uploading', str(len(pcaps)))
 
             for i, pcap_file in enumerate(pcaps, 1):
                 pcap_path = os.path.join(handshake_dir, pcap_file)
                 hc_path   = pcap_path.replace('.pcap', '.tmp.hc22000')
+                short     = pcap_file[:12]
 
-                # Convert
-                short = pcap_file[:14]
-                self._set_status('uploading', f"{i}/{len(pcaps)} {short}")
+                self._set_status('uploading', f"{i}/{len(pcaps)}")
                 hashes = self._convert(pcap_path, hc_path)
                 if not hashes:
                     logging.debug(f"[pwngpu] No hashes from {pcap_file}.")
                     self.sent.add(pcap_file)
                     continue
 
-                # Send
                 self._set_status('cracking', short)
                 success, cracked_count = self._send(server_url, api_key, hc_path, pcap_file)
 
@@ -282,25 +329,12 @@ class GpuCrack(Plugin):
             else:
                 self._set_status('no_match')
 
-            # 5. Fetch accumulated results from server
+            # 5. Pull accumulated results from server
             self._fetch_and_save_results(server_url, api_key)
 
-    def _convert(self, pcap_path, hc_path):
-        try:
-            subprocess.run(
-                ['hcxpcapngtool', '-o', hc_path, pcap_path],
-                capture_output=True, text=True, timeout=60
-            )
-            if os.path.exists(hc_path) and os.path.getsize(hc_path) > 0:
-                with open(hc_path, 'r') as f:
-                    return [l.strip() for l in f if l.strip()]
-        except FileNotFoundError:
-            logging.error("[pwngpu] hcxpcapngtool not found.")
-            self._set_status('error', 'no hcxtool')
-        except Exception as e:
-            logging.error(f"[pwngpu] Conversion error: {e}")
-            self._set_status('error', 'convert')
-        return []
+    # ------------------------------------------------------------------ #
+    #  Network helpers                                                     #
+    # ------------------------------------------------------------------ #
 
     def _ping_server(self, server_url, api_key):
         try:
@@ -319,7 +353,13 @@ class GpuCrack(Plugin):
                 response = requests.post(
                     f"{server_url}/crack",
                     headers={'X-API-Key': api_key},
-                    files={'file': (original_name.replace('.pcap', '.hc22000'), f, 'application/octet-stream')},
+                    files={
+                        'file': (
+                            original_name.replace('.pcap', '.hc22000'),
+                            f,
+                            'application/octet-stream'
+                        )
+                    },
                     timeout=60
                 )
             response.raise_for_status()
@@ -338,6 +378,23 @@ class GpuCrack(Plugin):
             self._set_status('error', 'send')
         return False, 0
 
+    def _convert(self, pcap_path, hc_path):
+        try:
+            subprocess.run(
+                ['hcxpcapngtool', '-o', hc_path, pcap_path],
+                capture_output=True, text=True, timeout=60
+            )
+            if os.path.exists(hc_path) and os.path.getsize(hc_path) > 0:
+                with open(hc_path, 'r') as f:
+                    return [l.strip() for l in f if l.strip()]
+        except FileNotFoundError:
+            logging.error("[pwngpu] hcxpcapngtool not found.")
+            self._set_status('error', 'no hcxtool')
+        except Exception as e:
+            logging.error(f"[pwngpu] Conversion error: {e}")
+            self._set_status('error', 'convert')
+        return []
+
     def _fetch_and_save_results(self, server_url, api_key):
         try:
             r = requests.get(
@@ -347,15 +404,13 @@ class GpuCrack(Plugin):
             )
             r.raise_for_status()
             cracked = r.json().get('cracked', [])
-            count = len(cracked)
+            count   = len(cracked)
             if cracked:
                 self._save_results(cracked)
             self._set_status('results', str(count))
             logging.info(f"[pwngpu] {count} total result(s) in server potfile.")
         except Exception as e:
             logging.warning(f"[pwngpu] Could not fetch results: {e}")
-            # Don't overwrite a meaningful status (cracked/no_match) on a
-            # polling failure — just log it and leave the display as-is.
 
     def _save_results(self, cracked):
         if not cracked:
