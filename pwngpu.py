@@ -29,6 +29,7 @@ class GpuCrack(Plugin):
     USB_OWN_IP    = '10.0.0.2'
     USB_GATEWAY   = '10.0.0.1'
     POLL_INTERVAL = 60
+    CAPTURE_EXTENSIONS = ('.pcap', '.pcapng')
 
     def __init__(self):
         self._run_lock     = Lock()   # prevents concurrent _run() calls
@@ -324,7 +325,7 @@ class GpuCrack(Plugin):
 
         pcaps = [
             f for f in all_files
-            if f.endswith('.pcap')
+            if f.endswith(self.CAPTURE_EXTENSIONS)
             and f not in self.sent
             and not any(w in f for w in whitelist)
         ]
@@ -341,12 +342,16 @@ class GpuCrack(Plugin):
         total_new = 0
         for i, pcap_file in enumerate(pcaps, 1):
             pcap_path = os.path.join(handshake_dir, pcap_file)
-            hc_path   = pcap_path.replace('.pcap', '.tmp.hc22000')
+            hc_path   = os.path.splitext(pcap_path)[0] + '.tmp.hc22000'
             short     = pcap_file[:12]
 
             log.info(f"[pwngpu] [{i}/{len(pcaps)}] Converting: {pcap_file}")
             self._set_status('uploading', f"{i}/{len(pcaps)}", log_it=False)
             hashes = self._convert(pcap_path, hc_path)
+
+            if hashes is None:
+                log.info(f"[pwngpu] Conversion failed for {pcap_file}, will retry next sync.")
+                continue   # NOT marked sent — will be retried
 
             if not hashes:
                 log.info(f"[pwngpu] No hashes in {pcap_file}, marking sent.")
@@ -446,6 +451,7 @@ class GpuCrack(Plugin):
             if os.path.exists(hc_path) and os.path.getsize(hc_path) > 0:
                 with open(hc_path, 'r') as f:
                     return [l.strip() for l in f if l.strip()]
+            return []  # ran fine, genuinely no extractable hash
         except FileNotFoundError:
             log.error("[pwngpu] hcxpcapngtool not found — install it first.")
             self._set_status('error', 'no hcxtool')
@@ -455,7 +461,7 @@ class GpuCrack(Plugin):
         except Exception as e:
             log.error(f"[pwngpu] Conversion error: {e}")
             self._set_status('error', 'convert')
-        return []
+        return None  # signals "error, retry later" vs [] = "tried, nothing there"
 
     def _fetch_and_save_results(self, server_url, api_key):
         try:
