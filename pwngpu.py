@@ -13,7 +13,7 @@ import pwnagotchi.ui.fonts as fonts
 
 class GpuCrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '2.0.2'
+    __version__ = '2.1.0'
     __license__ = 'GPL3'
     __description__ = (
         'Sends uncracked handshakes to a GPU cracking server on your PC via USB gadget. '
@@ -23,17 +23,57 @@ class GpuCrack(Plugin):
     POTFILE_PATH = '/root/handshakes/cracked.pwngpu.potfile'
     STATUS_PATH  = '/root/handshakes/.pwngpu_crack_status.json'
 
-    # USB gadget interface — usb0 when tethered to a PC
-    USB_IFACE    = 'usb0'
-    # Default gateway over usb0 that points to the PC
-    USB_GATEWAY  = '10.0.0.1'
+    USB_IFACE   = 'usb0'
+    USB_GATEWAY = '10.0.0.1'
 
     def __init__(self):
-        self.lock        = Lock()
-        self.last_run    = 0
-        self.sent        = set()
-        self.ui_status   = 'GPU: waiting'
+        self.lock      = Lock()
+        self.last_run  = 0
+        self.sent      = set()
+        self._status   = 'waiting'   # internal state string
         self._load_status()
+
+    # ------------------------------------------------------------------ #
+    #  Status helper                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _set_status(self, state: str, detail: str = ''):
+        """
+        Central status setter.  All display text is built here so the
+        on-screen label is always consistent with the internal state.
+
+        States
+        ------
+        waiting        – plugin idle, USB not yet checked
+        no_usb         – USB interface down / no IP
+        connecting     – about to ping the server
+        offline        – server did not respond to /health
+        online         – server is up, nothing to do right now
+        scanning       – listing pcap files in handshake dir
+        uploading N    – sending N file(s) to the server
+        cracking NAME  – server accepted NAME, hashcat running
+        cracked N      – N password(s) found (shown briefly)
+        no_match       – server finished, nothing cracked
+        results N      – polling /results; N total in server pot
+        error MSG      – something went wrong
+        """
+        self._status = state
+        label_map = {
+            'waiting':    'GPU: waiting',
+            'no_usb':     'GPU: no USB',
+            'connecting': 'GPU: connecting',
+            'offline':    'GPU: offline',
+            'online':     'GPU: online',
+            'scanning':   'GPU: scanning',
+            'uploading':  f'GPU: uploading {detail}',
+            'cracking':   f'GPU: cracking {detail}',
+            'cracked':    f'GPU: {detail} cracked!',
+            'no_match':   'GPU: no match',
+            'results':    f'GPU: {detail} total',
+            'error':      f'GPU: err {detail}',
+        }
+        self.ui_status = label_map.get(state, f'GPU: {state}')
+        logging.debug(f"[pwngpu] status -> {self.ui_status}")
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -44,6 +84,7 @@ class GpuCrack(Plugin):
         if missing:
             logging.error(f"[pwngpu] Missing config fields: {missing}")
             return
+        self._set_status('waiting')
         logging.info("[pwngpu] Plugin loaded.")
 
     def on_unload(self, ui):
@@ -75,7 +116,7 @@ class GpuCrack(Plugin):
         ui.add_element('pwngpu_crack_status', LabeledValue(
             color=BLACK,
             label='',
-            value='GPU: waiting',
+            value=self.ui_status,
             position=pos,
             label_font=fonts.Bold,
             text_font=fonts.Small
@@ -90,7 +131,6 @@ class GpuCrack(Plugin):
 
     def on_handshake(self, agent, filename, access_point, client_station):
         if not self._usb_connected():
-            logging.debug("[pwngpu] USB not connected, skipping on_handshake.")
             return
         if self.lock.locked():
             return
@@ -100,7 +140,6 @@ class GpuCrack(Plugin):
 
     def on_internet_available(self, agent):
         if not self._usb_connected():
-            logging.debug("[pwngpu] USB not connected, skipping on_internet_available.")
             return
         if self.lock.locked():
             return
@@ -126,32 +165,22 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def _usb_connected(self):
-        """
-        Returns True if the usb0 gadget interface is up and has an IP.
-        This is only true when the Pwnagotchi is tethered to a PC.
-        """
         try:
             result = subprocess.run(
                 ['ip', 'addr', 'show', self.USB_IFACE],
                 capture_output=True, text=True, timeout=3
             )
-            if result.returncode != 0:
-                self.ui_status = 'GPU: no USB'
+            if result.returncode != 0 or 'inet ' not in result.stdout:
+                self._set_status('no_usb')
                 return False
-            if 'inet ' in result.stdout:
-                return True
-            self.ui_status = 'GPU: no USB'
-            return False
+            return True
         except Exception as e:
             logging.debug(f"[pwngpu] USB check error: {e}")
-            self.ui_status = 'GPU: no USB'
+            self._set_status('no_usb')
             return False
 
     def _get_server_url(self):
-        """
-        Build server URL: use config server_url if set,
-        otherwise default to the USB gateway IP.
-        """
+        #TODO: allow separate config for local vs remote server URL (e.g. for LAN vs WAN use)
         url = self.options.get('server_url', '').rstrip('/')
         if not url:
             port = self.options.get('port', 6881)
@@ -192,15 +221,17 @@ class GpuCrack(Plugin):
             handshake_dir = config['bettercap']['handshakes']
             whitelist     = self.options.get('whitelist', [])
 
-            self.ui_status = 'GPU: connecting...'
-
+            # 1. Ping server
+            self._set_status('connecting')
             if not self._ping_server(server_url, api_key):
                 logging.warning(f"[pwngpu] Server unreachable at {server_url}")
-                self.ui_status = 'GPU: offline'
+                self._set_status('offline')
                 return
 
-            self.ui_status = 'GPU: online'
+            self._set_status('online')
 
+            # 2. Scan handshake directory
+            self._set_status('scanning')
             pcaps = [
                 f for f in os.listdir(handshake_dir)
                 if f.endswith('.pcap')
@@ -211,37 +242,47 @@ class GpuCrack(Plugin):
             if not pcaps:
                 logging.debug("[pwngpu] No new pcaps to send.")
                 self._fetch_and_save_results(server_url, api_key)
-                self.ui_status = 'GPU: idle'
                 return
 
-            logging.info(f"[pwngpu] Sending {len(pcaps)} pcap(s) to GPU server.")
-            self.ui_status = f"GPU: sending {len(pcaps)} file(s)"
+            # 3. Upload loop
+            total_new = 0
+            logging.info(f"[pwngpu] {len(pcaps)} new pcap(s) to send.")
+            self._set_status('uploading', str(len(pcaps)))
 
-            for pcap_file in pcaps:
+            for i, pcap_file in enumerate(pcaps, 1):
                 pcap_path = os.path.join(handshake_dir, pcap_file)
                 hc_path   = pcap_path.replace('.pcap', '.tmp.hc22000')
 
+                # Convert
+                short = pcap_file[:14]
+                self._set_status('uploading', f"{i}/{len(pcaps)} {short}")
                 hashes = self._convert(pcap_path, hc_path)
                 if not hashes:
                     logging.debug(f"[pwngpu] No hashes from {pcap_file}.")
                     self.sent.add(pcap_file)
                     continue
 
-                self.ui_status = f"GPU: cracking {pcap_file[:16]}"
+                # Send
+                self._set_status('cracking', short)
                 success, cracked_count = self._send(server_url, api_key, hc_path, pcap_file)
 
                 if success:
                     self.sent.add(pcap_file)
+                    total_new += cracked_count
                     if cracked_count > 0:
-                        self.ui_status = f"GPU: {cracked_count} cracked!"
                         logging.info(f"[pwngpu] {cracked_count} password(s) cracked from {pcap_file}")
-                    else:
-                        self.ui_status = 'GPU: no match'
 
                 if os.path.exists(hc_path):
                     os.remove(hc_path)
 
+            # 4. Final status
             self._save_status()
+            if total_new > 0:
+                self._set_status('cracked', str(total_new))
+            else:
+                self._set_status('no_match')
+
+            # 5. Fetch accumulated results from server
             self._fetch_and_save_results(server_url, api_key)
 
     def _convert(self, pcap_path, hc_path):
@@ -255,8 +296,10 @@ class GpuCrack(Plugin):
                     return [l.strip() for l in f if l.strip()]
         except FileNotFoundError:
             logging.error("[pwngpu] hcxpcapngtool not found.")
+            self._set_status('error', 'no hcxtool')
         except Exception as e:
             logging.error(f"[pwngpu] Conversion error: {e}")
+            self._set_status('error', 'convert')
         return []
 
     def _ping_server(self, server_url, api_key):
@@ -271,7 +314,6 @@ class GpuCrack(Plugin):
             return False
 
     def _send(self, server_url, api_key, hc_path, original_name):
-        """POST the .hc22000 to /crack. Returns (success, cracked_count)."""
         try:
             with open(hc_path, 'rb') as f:
                 response = requests.post(
@@ -287,10 +329,13 @@ class GpuCrack(Plugin):
             return True, data.get('total', 0)
         except requests.exceptions.ConnectionError:
             logging.warning("[pwngpu] Connection error during send.")
+            self._set_status('offline')
         except requests.exceptions.Timeout:
             logging.warning("[pwngpu] Server timed out during send.")
+            self._set_status('error', 'timeout')
         except Exception as e:
             logging.error(f"[pwngpu] Send error: {e}")
+            self._set_status('error', 'send')
         return False, 0
 
     def _fetch_and_save_results(self, server_url, api_key):
@@ -302,12 +347,15 @@ class GpuCrack(Plugin):
             )
             r.raise_for_status()
             cracked = r.json().get('cracked', [])
+            count = len(cracked)
             if cracked:
                 self._save_results(cracked)
-                self.ui_status = f"GPU: {len(cracked)} total"
-                logging.info(f"[pwngpu] {len(cracked)} total result(s) in server potfile.")
+            self._set_status('results', str(count))
+            logging.info(f"[pwngpu] {count} total result(s) in server potfile.")
         except Exception as e:
             logging.warning(f"[pwngpu] Could not fetch results: {e}")
+            # Don't overwrite a meaningful status (cracked/no_match) on a
+            # polling failure — just log it and leave the display as-is.
 
     def _save_results(self, cracked):
         if not cracked:

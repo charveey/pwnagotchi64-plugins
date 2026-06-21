@@ -76,7 +76,8 @@ main.plugins.pwngpu.api_key = "your_pwngpu_key"   # must match the key shown in 
 main.plugins.pwngpu.port = 6881
 main.plugins.pwngpu.sleep = 1800
 ```
- 
+You can use `main.plugins.pwngpu.server_url = "http://url-to-your-remote--server"` to connect remotely to a server
+
 **Files created by this plugin:**
  
 | File | Description |
