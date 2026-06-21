@@ -1,11 +1,9 @@
 import pwnagotchi.plugins as plugins
-from pwnagotchi.ui.components import LabeledValue
 from pwnagotchi.ui.view import BLACK
 import pwnagotchi.ui.fonts as fonts
 import logging
 import csv
 import os
-import io
 
 try:
     import qrcode
@@ -17,11 +15,11 @@ except ImportError:
 
 class MyCrackedPasswords(plugins.Plugin):
     __author__ = '@silentree12th and charveey'
-    __version__ = '7.0.0'
+    __version__ = '8.0.0'
     __license__ = 'GPL3'
     __description__ = (
         'Aggregates cracked passwords from wpa-sec, pwncrack, and onlinehashcrack. '
-        'Generates WiFi QR codes, a wordlist, and displays the latest crack on screen.'
+        'Generates WiFi QR codes, a wordlist, and shows the latest crack on the status line.'
     )
 
     WORDLIST_DIR  = '/home/pwn/wordlists/'
@@ -32,6 +30,7 @@ class MyCrackedPasswords(plugins.Plugin):
         'wpa-sec':         '/root/handshakes/wpa-sec.cracked.potfile',
         'pwncrack':        '/root/handshakes/cracked.pwncrack.potfile',
         'onlinehashcrack': '/root/handshakes/onlinehashcrack.cracked',
+        'pwngpu': '/root/handshakes/cracked.pwngpu.potfile',
     }
 
     def on_loaded(self):
@@ -41,47 +40,13 @@ class MyCrackedPasswords(plugins.Plugin):
         self._update_all()
 
     # ------------------------------------------------------------------ #
-    #  UI                                                                  #
+    #  UI — status line only, no custom element                           #
     # ------------------------------------------------------------------ #
-
-    def on_ui_setup(self, ui):
-        if ui.is_waveshare_v2() or ui.is_waveshare_v3() or ui.is_waveshare_v4():
-            h_pos = (0, 95)
-            v_pos = (180, 61)
-        elif ui.is_waveshare_v1():
-            h_pos = (0, 95)
-            v_pos = (170, 61)
-        elif ui.is_waveshare144lcd():
-            h_pos = (0, 92)
-            v_pos = (78, 67)
-        elif ui.is_inky():
-            h_pos = (0, 83)
-            v_pos = (165, 54)
-        elif ui.is_waveshare27inch():
-            h_pos = (0, 153)
-            v_pos = (216, 122)
-        else:
-            h_pos = (0, 91)
-            v_pos = (180, 61)
-
-        pos = v_pos if self.options.get('orientation') == 'vertical' else h_pos
-
-        ui.add_element('mycracked-pw', LabeledValue(
-            color=BLACK,
-            label='',
-            value='',
-            position=pos,
-            label_font=fonts.Bold,
-            text_font=fonts.Small
-        ))
-
-    def on_unload(self, ui):
-        with ui._lock:
-            ui.remove_element('mycracked-pw')
 
     def on_ui_update(self, ui):
         """
-        Pick the most recently cracked password across all potfiles and show it.
+        Find the most recently cracked password across all potfiles
+        and push it to the pwnagotchi status line.
         """
         best_entry = None
         best_mtime = 0
@@ -103,7 +68,7 @@ class MyCrackedPasswords(plugins.Plugin):
                     if len(parts) >= 4:
                         ssid     = parts[2] or 'Unknown'
                         password = parts[3] or '?'
-                        best_entry = f"{ssid} - {password}"
+                        best_entry = f"[INFO] Cracked: {ssid} / {password}"
                         best_mtime = mtime
 
                 elif source == 'onlinehashcrack':
@@ -112,13 +77,17 @@ class MyCrackedPasswords(plugins.Plugin):
                         password = parts[2].strip()
                         task     = parts[0].strip()
                         ssid     = task[:-18].rstrip('_').strip() if len(task) > 17 else task
-                        best_entry = f"OHC: {ssid} - {password}"
+                        best_entry = f"[INFO] OHC: {ssid} / {password}"
                         best_mtime = mtime
 
             except Exception as e:
                 logging.warning(f"[mycracked-pw] Could not read {path} for display: {e}")
 
-        ui.set('mycracked-pw', best_entry if best_entry else 'No cracked passwords yet')
+        if best_entry:
+            ui.set('status', best_entry)
+            logging.info(f"[mycracked-pw] {best_entry}")
+        else:
+            ui.set('status', '[STATUS] No cracked passwords yet')
 
     # ------------------------------------------------------------------ #
     #  Handshake hook                                                      #
@@ -186,6 +155,7 @@ class MyCrackedPasswords(plugins.Plugin):
         entries += self._read_wpasec_potfile(self.POTFILES['wpa-sec'])
         entries += self._read_wpasec_potfile(self.POTFILES['pwncrack'])
         entries += self._read_ohc_potfile(self.POTFILES['onlinehashcrack'])
+        entries += self._read_wpasec_potfile(self.POTFILES['pwngpu'])
 
         if not entries:
             logging.info("[mycracked-pw] No cracked passwords found yet.")
@@ -201,6 +171,11 @@ class MyCrackedPasswords(plugins.Plugin):
             if key not in seen:
                 seen.add(key)
                 unique_entries.append((bssid, ssid, password))
+
+        # Log a summary to the system log
+        logging.info(f"[mycracked-pw] [STATUS] {len(unique_entries)} unique password(s) in database.")
+        for _, ssid, password in unique_entries:
+            logging.info(f"[mycracked-pw] [INFO] {ssid} => {password}")
 
         self._generate_qrcodes(unique_entries)
         self._update_wordlist([pw for _, _, pw in unique_entries])
@@ -224,7 +199,7 @@ class MyCrackedPasswords(plugins.Plugin):
                 qr.make(fit=True)
                 with open(filepath, 'w+', encoding='utf-8') as f:
                     qr.print_ascii(out=f)
-                logging.info(f"[mycracked-pw] QR code saved: {filepath}")
+                logging.info(f"[mycracked-pw] [INFO] QR code saved: {ssid}")
             except Exception as e:
                 logging.error(f"[mycracked-pw] Failed to generate QR code for {ssid}: {e}")
 
@@ -234,6 +209,6 @@ class MyCrackedPasswords(plugins.Plugin):
             with open(self.WORDLIST_PATH, 'w', encoding='utf-8') as g:
                 for pw in new_lines:
                     g.write(pw + '\n')
-            logging.info(f"[mycracked-pw] Wordlist updated with {len(new_lines)} unique passwords.")
+            logging.info(f"[mycracked-pw] [STATUS] Wordlist updated: {len(new_lines)} unique password(s).")
         except Exception as e:
             logging.error(f"[mycracked-pw] Failed to update wordlist: {e}")

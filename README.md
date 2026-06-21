@@ -35,19 +35,19 @@ main.plugins.better-pwncrack.key = "your_pwncrack_key"
 
 ---
 
-# OnlineHashCrack v2
+# Better OnlineHashCrack
 
-Run the following command to install OnlineHashCrack
+Run the following command to install Better OnlineHashCrack
 
-`sudo pwnagotchi plugins install ohcapi`
+`sudo pwnagotchi plugins install better-ohcapi`
 
 Add the following lines to your `/etc/pwnagotchi.config.toml`
 
 ```TOML
-main.plugins.ohcapi.enabled = true
-main.plugins.ohcapi.api_key = "your_ohc_key"
-main.plugins.ohcapi.receive_email = "yes"
-main.plugins.ohcapi.sleep = 3600
+main.plugins.better-ohcapi.enabled = true
+main.plugins.better-ohcapi.api_key = "your_ohc_key"
+main.plugins.better-ohcapi.receive_email = "yes"
+main.plugins.better-ohcapi.sleep = 3600
 ```
 
 **Files created by this plugin:**
@@ -56,7 +56,34 @@ main.plugins.ohcapi.sleep = 3600
 |------|-------------|
 | `/root/handshakes/onlinehashcrack.cracked` | Cracked passwords downloaded from OnlineHashCrack |
 
-
+---
+ 
+## pwngpu
+ 
+Converts captured `.pcap` handshakes to `.hc22000` format and sends them over USB to a companion app running on your own PC, where they're cracked locally with your GPU via hashcat. No cloud upload and no third-party API key — everything stays on hardware you control.
+ 
+Requires the [PwnGPU Crack Server](https://github.com/charveey/pwngpu-server) companion app running on Windows, with the Pwnagotchi tethered to it over USB (the plugin talks to the app over the `usb0` gadget interface, reaching it at `10.0.0.1` by default). <!-- add a link to the companion app repo here once it's published -->
+ 
+Run the following command to install pwngpu
+ 
+`sudo pwnagotchi plugins install pwngpu`
+ 
+Add the following lines to your `/etc/pwnagotchi/config.toml`
+ 
+```toml
+main.plugins.pwngpu.enabled = true
+main.plugins.pwngpu.api_key = "your_pwngpu_key"   # must match the key shown in the companion app
+main.plugins.pwngpu.port = 6881
+main.plugins.pwngpu.sleep = 1800
+```
+ 
+**Files created by this plugin:**
+ 
+| File | Description |
+|------|-------------|
+| `/root/handshakes/cracked.pwngpu.potfile` | Cracked passwords downloaded from the companion app |
+| `/root/handshakes/.pwngpu_crack_status.json` | Tracks which pcaps have already been sent |
+ 
 ---
 
 ## cracked-pw
@@ -76,7 +103,6 @@ Add the following lines to your `/etc/pwnagotchi/config.toml`
 
 ```toml
 main.plugins.cracked-pw.enabled = true
-main.plugins.cracked-pw.orientation = "horizontal"  # or "vertical"
 ```
 
 **Potfiles read by this plugin:**
@@ -99,25 +125,29 @@ main.plugins.cracked-pw.orientation = "horizontal"  # or "vertical"
 ## Recommended stack
 
 These plugins are designed to work together alongside the official `wpa-sec` plugin:
-
+ 
 ```toml
 # Upload to wpa-sec
 main.plugins.wpa-sec.enabled = true
 main.plugins.wpa-sec.api_key = "your_wpasec_key"
 main.plugins.wpa-sec.download_results = true
 main.plugins.wpa-sec.download_interval = 3600
-
+ 
 # Upload to pwncrack
 main.plugins.better-pwncrack.enabled = true
 main.plugins.better-pwncrack.key = "your_pwncrack_key"
-
+ 
 # Upload to OnlineHashCrack
-main.plugins.ohcapi.enabled = true
-main.plugins.ohcapi.api_key = "your_ohc_key"
-main.plugins.ohcapi.receive_email = "yes"
-
+main.plugins.better-ohcapi.enabled = true
+main.plugins.better-ohcapi.api_key = "your_ohc_key"
+main.plugins.better-ohcapi.receive_email = "yes"
+ 
+# OR crack locally on your own GPU instead of/alongside the cloud options
+# above - no API key needed, just the companion app running on a tethered PC
+main.plugins.pwngpu.enabled = true
+main.plugins.pwngpu.api_key = "your_pwngpu_key"
+ 
 # Display & aggregate results
 main.plugins.cracked-pw.enabled = true
-main.plugins.cracked-pw.orientation = "horizontal"
 ```
 
