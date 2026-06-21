@@ -13,7 +13,7 @@ import pwnagotchi.ui.fonts as fonts
 
 class GpuCrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '2.0.1'
+    __version__ = '2.0.2'
     __license__ = 'GPL3'
     __description__ = (
         'Sends uncracked handshakes to a GPU cracking server on your PC via USB gadget. '
@@ -60,9 +60,9 @@ class GpuCrack(Plugin):
 
     def on_ui_setup(self, ui):
         if ui.is_waveshare_v2() or ui.is_waveshare_v3() or ui.is_waveshare_v4():
-            pos = (0, 90)
+            pos = (0, 128)
         elif ui.is_waveshare_v1():
-            pos = (0, 90)
+            pos = (0, 128)
         elif ui.is_waveshare144lcd():
             pos = (0, 104)
         elif ui.is_inky():
@@ -70,7 +70,7 @@ class GpuCrack(Plugin):
         elif ui.is_waveshare27inch():
             pos = (0, 165)
         else:
-            pos = (0, 90)
+            pos = (0, 128)
 
         ui.add_element('pwngpu_crack_status', LabeledValue(
             color=BLACK,
