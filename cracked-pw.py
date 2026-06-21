@@ -15,7 +15,7 @@ except ImportError:
 
 class MyCrackedPasswords(plugins.Plugin):
     __author__ = '@silentree12th and charveey'
-    __version__ = '8.0.0'
+    __version__ = '8.0.1'
     __license__ = 'GPL3'
     __description__ = (
         'Aggregates cracked passwords from wpa-sec, pwncrack, and onlinehashcrack. '
@@ -68,7 +68,7 @@ class MyCrackedPasswords(plugins.Plugin):
                     if len(parts) >= 4:
                         ssid     = parts[2] or 'Unknown'
                         password = parts[3] or '?'
-                        best_entry = f"[INFO] Cracked: {ssid} / {password}"
+                        best_entry = f"Cracked: {ssid} / {password}"
                         best_mtime = mtime
 
                 elif source == 'onlinehashcrack':
@@ -77,7 +77,7 @@ class MyCrackedPasswords(plugins.Plugin):
                         password = parts[2].strip()
                         task     = parts[0].strip()
                         ssid     = task[:-18].rstrip('_').strip() if len(task) > 17 else task
-                        best_entry = f"[INFO] OHC: {ssid} / {password}"
+                        best_entry = f"Cracked: {ssid} / {password}"
                         best_mtime = mtime
 
             except Exception as e:
