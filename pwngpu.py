@@ -13,7 +13,7 @@ import pwnagotchi.ui.fonts as fonts
 
 class GpuCrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '2.3.0'
+    __version__ = '2.4.0'
     __license__ = 'GPL3'
     __description__ = (
         'Sends uncracked handshakes to a GPU cracking server on your PC via USB gadget. '
@@ -43,7 +43,7 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def _set_status(self, state: str, detail: str = ''):
-        self._status = state
+        self._status   = state
         label_map = {
             'waiting':    'GPU: waiting',
             'no_usb':     'GPU: no USB',
@@ -59,7 +59,9 @@ class GpuCrack(Plugin):
             'error':      f'GPU: err {detail}',
         }
         self.ui_status = label_map.get(state, f'GPU: {state}')
-        logging.debug(f"[pwngpu] status -> {self.ui_status}")
+        # Use INFO so status changes always appear in logs without
+        # needing debug-level logging enabled on the pwnagotchi.
+        logging.info(f"[pwngpu] {self.ui_status}")
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -73,7 +75,7 @@ class GpuCrack(Plugin):
         self._stop_event.clear()
         self._poll_thread = Thread(target=self._poller, daemon=True, name='pwngpu-poll')
         self._poll_thread.start()
-        logging.info("[pwngpu] Plugin loaded, poller started.")
+        logging.info(f"[pwngpu] Plugin v{self.__version__} loaded — poller every {self.POLL_INTERVAL}s.")
 
     def on_unload(self, ui):
         self._stop_event.set()
@@ -92,21 +94,19 @@ class GpuCrack(Plugin):
 
     def _poller(self):
         """
-        Lightweight daemon thread. Wakes every POLL_INTERVAL seconds.
+        Lightweight daemon thread — wakes every POLL_INTERVAL seconds.
 
-        While the pwnagotchi is in the field (USB down):
-          - One subprocess call to check usb0 → returns immediately → sleeps.
-          - No HTTP traffic, no file I/O, negligible battery impact.
+        In the field (USB down):  one 'ip addr' subprocess → sleep. Cheap.
+        Tethered, during cooldown: USB check only, no HTTP. Display unchanged.
+        Tethered, cooldown elapsed: triggers a full _run() sync.
 
-        While tethered to the PC (USB up):
-          - During cooldown: only checks USB, skips HTTP ping.
-            Display stays on last meaningful status (online/results/etc.).
-          - When cooldown elapsed: triggers a full _run() sync.
+        The poller also acts as the primary sync trigger on boot when
+        the pwnagotchi starts already tethered and no hooks have fired yet.
+        In that case self._agent is None, so we attempt to get the agent
+        from the pwnagotchi singleton directly.
         """
-        # Short initial delay so on_epoch/on_internet_available have a
-        # chance to store self._agent before the poller first tries to use it.
-        self._stop_event.wait(15)
-
+        # No initial delay — check immediately so the display updates fast
+        # on boot when USB is already connected.
         while not self._stop_event.is_set():
             try:
                 self._poll_tick()
@@ -115,28 +115,35 @@ class GpuCrack(Plugin):
             self._stop_event.wait(self.POLL_INTERVAL)
 
     def _poll_tick(self):
-        # Always check USB — cheap subprocess, updates display if down.
+        # Step 1 — USB check. Cheap, always first.
         if not self._usb_connected():
+            # Display already set to 'no_usb' inside _usb_connected().
             return
 
-        # USB is up. If we have no agent yet, show 'connecting' so the
-        # user knows the plugin is alive but not ready yet.
+        # Step 2 — Try to get the agent if we don't have it yet.
+        # pwnagotchi exposes its global agent via pwnagotchi.agent.
         if self._agent is None:
-            self._set_status('connecting')
-            return
+            try:
+                import pwnagotchi
+                self._agent = pwnagotchi.agent()
+                logging.info("[pwngpu] Agent acquired from pwnagotchi singleton.")
+            except Exception:
+                # Agent not ready yet — stay on 'waiting', not 'connecting',
+                # so the display is honest about what's happening.
+                self._set_status('waiting')
+                logging.debug("[pwngpu] Agent not ready yet, will retry.")
+                return
 
-        sleep = self.options.get('sleep', 1800)
+        # Step 3 — Check cooldown. During cooldown leave the display alone.
+        sleep   = self.options.get('sleep', 1800)
         elapsed = time.time() - self.last_run
-
-        # During cooldown: USB is up but we don't ping the server.
-        # The display already shows the result of the last sync —
-        # leave it alone to avoid flickering between 'connecting' and
-        # the real status on every poll tick.
         if elapsed < sleep:
+            logging.debug(f"[pwngpu] Cooldown: {int(sleep - elapsed)}s remaining.")
             return
 
-        # Cooldown elapsed — trigger a full sync if nothing is running.
+        # Step 4 — Trigger a full sync if nothing else is already running.
         if not self.lock.locked():
+            logging.info("[pwngpu] Poller triggering sync.")
             self._run(self._agent)
             self.last_run = time.time()
 
@@ -175,32 +182,36 @@ class GpuCrack(Plugin):
     # ------------------------------------------------------------------ #
 
     def on_handshake(self, agent, filename, access_point, client_station):
-        """New handshake — always upload immediately, bypass cooldown."""
+        """New handshake — always upload immediately, bypasses cooldown."""
         self._agent = agent
         if not self._usb_connected():
             return
         if self.lock.locked():
+            logging.debug("[pwngpu] on_handshake: sync already running, skipping.")
             return
-        logging.info(f"[pwngpu] New handshake: {filename}")
+        logging.info(f"[pwngpu] New handshake: {filename} — triggering immediate sync.")
         self._run(agent)
         self.last_run = time.time()
 
     def on_internet_available(self, agent):
-        self._maybe_run(agent)
+        self._maybe_run(agent, source='on_internet_available')
 
     def on_epoch(self, agent, epoch, epoch_data):
-        self._maybe_run(agent)
+        self._maybe_run(agent, source=f'on_epoch({epoch})')
 
-    def _maybe_run(self, agent):
-        """Store agent reference; trigger a sync if cooldown has elapsed."""
+    def _maybe_run(self, agent, source='hook'):
+        """Store agent; trigger a sync if cooldown has elapsed."""
         self._agent = agent
         if not self._usb_connected():
             return
         if self.lock.locked():
             return
-        sleep = self.options.get('sleep', 1800)
-        if time.time() - self.last_run < sleep:
+        sleep   = self.options.get('sleep', 1800)
+        elapsed = time.time() - self.last_run
+        if elapsed < sleep:
+            logging.debug(f"[pwngpu] {source}: cooldown {int(sleep - elapsed)}s remaining.")
             return
+        logging.info(f"[pwngpu] {source}: triggering sync.")
         self._run(agent)
         self.last_run = time.time()
 
@@ -210,10 +221,9 @@ class GpuCrack(Plugin):
 
     def _usb_connected(self):
         """
-        Returns True if usb0 is up and has the expected static IP (10.0.0.2).
-        Checking for the exact IP guards against a misconfigured interface
-        that has some other address and would silently fail to reach the PC.
-        Single subprocess call — the only cost while in the field.
+        Returns True only if usb0 is up with exactly 10.0.0.2 assigned.
+        Matching the exact static IP avoids false positives from a
+        misconfigured interface while being reliable for this fixed setup.
         """
         try:
             result = subprocess.run(
@@ -221,8 +231,12 @@ class GpuCrack(Plugin):
                 capture_output=True, text=True, timeout=3
             )
             if result.returncode != 0 or f'inet {self.USB_OWN_IP}' not in result.stdout:
+                if self._status != 'no_usb':
+                    logging.info("[pwngpu] USB not connected.")
                 self._set_status('no_usb')
                 return False
+            if self._status == 'no_usb':
+                logging.info(f"[pwngpu] USB connected: {self.USB_OWN_IP}")
             return True
         except Exception as e:
             logging.debug(f"[pwngpu] USB check error: {e}")
@@ -247,7 +261,7 @@ class GpuCrack(Plugin):
             with open(self.STATUS_PATH, 'r') as f:
                 data = json.load(f)
                 self.sent = set(data.get('sent', []))
-            logging.debug(f"[pwngpu] Loaded {len(self.sent)} previously sent entries.")
+            logging.info(f"[pwngpu] Loaded {len(self.sent)} previously sent entries.")
         except Exception as e:
             logging.warning(f"[pwngpu] Could not load status: {e}")
             self.sent = set()
@@ -277,47 +291,54 @@ class GpuCrack(Plugin):
                 logging.warning(f"[pwngpu] Server unreachable at {server_url}")
                 self._set_status('offline')
                 return
-
-            self._set_status('online')
+            logging.info(f"[pwngpu] Server online at {server_url}")
 
             # 2. Scan for unsent pcaps
             self._set_status('scanning')
+            try:
+                all_pcaps = os.listdir(handshake_dir)
+            except Exception as e:
+                logging.error(f"[pwngpu] Cannot read handshake dir {handshake_dir}: {e}")
+                self._set_status('error', 'dir')
+                return
+
             pcaps = [
-                f for f in os.listdir(handshake_dir)
+                f for f in all_pcaps
                 if f.endswith('.pcap')
                 and f not in self.sent
                 and not any(w in f for w in whitelist)
             ]
+            logging.info(f"[pwngpu] {len(pcaps)} unsent pcap(s) found (total in dir: {len(all_pcaps)}).")
 
             if not pcaps:
-                logging.debug("[pwngpu] No new pcaps to send.")
                 self._fetch_and_save_results(server_url, api_key)
                 return
 
             # 3. Convert and upload
             total_new = 0
-            logging.info(f"[pwngpu] {len(pcaps)} new pcap(s) to send.")
 
             for i, pcap_file in enumerate(pcaps, 1):
                 pcap_path = os.path.join(handshake_dir, pcap_file)
                 hc_path   = pcap_path.replace('.pcap', '.tmp.hc22000')
                 short     = pcap_file[:12]
 
+                logging.info(f"[pwngpu] [{i}/{len(pcaps)}] Converting {pcap_file}")
                 self._set_status('uploading', f"{i}/{len(pcaps)}")
                 hashes = self._convert(pcap_path, hc_path)
+
                 if not hashes:
-                    logging.debug(f"[pwngpu] No hashes from {pcap_file}.")
+                    logging.info(f"[pwngpu] No hashes extracted from {pcap_file}, marking sent.")
                     self.sent.add(pcap_file)
                     continue
 
+                logging.info(f"[pwngpu] [{i}/{len(pcaps)}] Uploading {pcap_file} ({len(hashes)} hash lines)")
                 self._set_status('cracking', short)
                 success, cracked_count = self._send(server_url, api_key, hc_path, pcap_file)
 
                 if success:
                     self.sent.add(pcap_file)
                     total_new += cracked_count
-                    if cracked_count > 0:
-                        logging.info(f"[pwngpu] {cracked_count} password(s) cracked from {pcap_file}")
+                    logging.info(f"[pwngpu] {pcap_file} queued on server. Immediate cracked: {cracked_count}")
 
                 if os.path.exists(hc_path):
                     os.remove(hc_path)
@@ -344,7 +365,8 @@ class GpuCrack(Plugin):
                 timeout=5
             )
             return r.status_code == 200
-        except Exception:
+        except Exception as e:
+            logging.debug(f"[pwngpu] Health check failed: {e}")
             return False
 
     def _send(self, server_url, api_key, hc_path, original_name):
@@ -380,15 +402,16 @@ class GpuCrack(Plugin):
 
     def _convert(self, pcap_path, hc_path):
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ['hcxpcapngtool', '-o', hc_path, pcap_path],
                 capture_output=True, text=True, timeout=60
             )
+            logging.debug(f"[pwngpu] hcxpcapngtool stdout: {result.stdout.strip()}")
             if os.path.exists(hc_path) and os.path.getsize(hc_path) > 0:
                 with open(hc_path, 'r') as f:
                     return [l.strip() for l in f if l.strip()]
         except FileNotFoundError:
-            logging.error("[pwngpu] hcxpcapngtool not found.")
+            logging.error("[pwngpu] hcxpcapngtool not found — is it installed?")
             self._set_status('error', 'no hcxtool')
         except Exception as e:
             logging.error(f"[pwngpu] Conversion error: {e}")
@@ -408,7 +431,7 @@ class GpuCrack(Plugin):
             if cracked:
                 self._save_results(cracked)
             self._set_status('results', str(count))
-            logging.info(f"[pwngpu] {count} total result(s) in server potfile.")
+            logging.info(f"[pwngpu] {count} total cracked result(s) on server.")
         except Exception as e:
             logging.warning(f"[pwngpu] Could not fetch results: {e}")
 
@@ -434,4 +457,4 @@ class GpuCrack(Plugin):
             with open(self.POTFILE_PATH, 'a', encoding='utf-8') as f:
                 for line in new_lines:
                     f.write(line + '\n')
-            logging.info(f"[pwngpu] Saved {len(new_lines)} new password(s).")
+            logging.info(f"[pwngpu] Saved {len(new_lines)} new password(s) to potfile.")
