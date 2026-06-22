@@ -11,7 +11,7 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.2'
+    __version__ = '1.0.3'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
@@ -215,6 +215,9 @@ class ohcapi(plugins.Plugin):
                 return True
             except (ValueError, JSONDecodeError) as e:
                 logging.error(f"[OHC] Invalid JSON response: {e}")
+                return False
+            except requests.exceptions.HTTPError as e:
+                logging.error(f"[OHC] HTTP error {result.status_code}: {result.text}")
                 return False
             except requests.exceptions.RequestException as e:
                 logging.warning(
