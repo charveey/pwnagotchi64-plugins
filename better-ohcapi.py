@@ -11,7 +11,7 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.3'
+    __version__ = '1.1.0'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
@@ -33,9 +33,6 @@ class ohcapi(plugins.Plugin):
         if missing:
             logging.error(f"[OHC] Missing required config fields: {missing}")
             return
-
-        if 'receive_email' not in self.options:
-            self.options['receive_email'] = 'yes'
 
         if 'sleep' not in self.options:
             self.options['sleep'] = 60 * 60  # 1 hour default
@@ -191,7 +188,6 @@ class ohcapi(plugins.Plugin):
             'action':        'add_tasks',
             'algo_mode':     22000,
             'hashes':        clean_hashes,
-            'receive_email': self.options['receive_email'],
         }
 
         for attempt in range(3):
