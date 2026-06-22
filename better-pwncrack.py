@@ -10,7 +10,7 @@ from pwnagotchi.plugins import Plugin
 
 class BetterPwncrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.0'
+    __version__ = '1.0.1'
     __license__ = 'GPL3'
     __description__ = 'Converts .pcap files to .hc22000 and uploads them to pwncrack.org when internet is available.'
 
@@ -84,6 +84,7 @@ class BetterPwncrack(Plugin):
 
         try:
             with self.lock:
+                self.last_run_time = time.time()
                 self._convert_and_upload()
                 self._download_potfile()
         except Exception as e:
@@ -94,10 +95,14 @@ class BetterPwncrack(Plugin):
         return any(item in filename for item in self.whitelist)
 
     def _convert_and_upload(self):
-        all_pcaps = [
-            f for f in os.listdir(self.handshake_dir)
-            if f.endswith('.pcap') and not self._is_whitelisted(f)
-        ]
+        try:
+            all_pcaps = [
+                f for f in os.listdir(self.handshake_dir)
+                if f.endswith('.pcap') and not self._is_whitelisted(f)
+            ]
+        except FileNotFoundError:
+            logging.error(f'[better-pwncrack] Handshake dir not found: {self.handshake_dir}')
+            return
 
         # Only process pcaps not yet uploaded
         new_pcaps = [f for f in all_pcaps if f not in self.uploaded]
@@ -119,8 +124,12 @@ class BetterPwncrack(Plugin):
                 result = subprocess.run(
                     ['hcxpcapngtool', '-o', tmp_hc_path, pcap_path],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    timeout=60
                 )
+            except subprocess.TimeoutExpired:
+                logging.warning(f'[better-pwncrack] hcxpcapngtool timed out on {pcap_file}')
+                continue
 
                 if os.path.exists(tmp_hc_path) and os.path.getsize(tmp_hc_path) > 0:
                     with open(tmp_hc_path, 'r') as f:
