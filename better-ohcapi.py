@@ -11,7 +11,7 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.1.0'
+    __version__ = '1.1.1'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
@@ -201,7 +201,7 @@ class ohcapi(plugins.Plugin):
                 result.raise_for_status()
                 data = result.json()
 
-                logging.info(f"[OHC] Upload response: {data}")
+                logging.debug(f"[OHC] Upload response: {data}")
                 
                 if data.get("success") is False:
                     logging.error(
