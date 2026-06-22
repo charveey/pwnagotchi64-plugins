@@ -1,6 +1,4 @@
 import pwnagotchi.plugins as plugins
-from pwnagotchi.ui.view import BLACK
-import pwnagotchi.ui.fonts as fonts
 import logging
 import csv
 import os
@@ -15,7 +13,7 @@ except ImportError:
 
 class MyCrackedPasswords(plugins.Plugin):
     __author__ = '@silentree12th and charveey'
-    __version__ = '8.0.1'
+    __version__ = '8.1.0'
     __license__ = 'GPL3'
     __description__ = (
         'Aggregates cracked passwords from wpa-sec, pwncrack, and onlinehashcrack. '
@@ -33,6 +31,10 @@ class MyCrackedPasswords(plugins.Plugin):
         'pwngpu': '/root/handshakes/cracked.pwngpu.potfile',
     }
 
+    def __init__(self):
+        self._last_ui_update = 0
+        self._cached_status = None
+    
     def on_loaded(self):
         logging.info("[mycracked-pw] Plugin loaded.")
         os.makedirs(self.WORDLIST_DIR, exist_ok=True)
@@ -50,6 +52,12 @@ class MyCrackedPasswords(plugins.Plugin):
         """
         best_entry = None
         best_mtime = 0
+        now = time.time()
+        if now - self._last_ui_update < 30:  # refresh toutes les 30s max
+            if self._cached_status:
+                ui.set('status', self._cached_status)
+            return
+        self._last_ui_update = now
 
         for source, path in self.POTFILES.items():
             if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -59,7 +67,11 @@ class MyCrackedPasswords(plugins.Plugin):
                 if mtime <= best_mtime:
                     continue
 
-                last_line = os.popen(f"tail -n 1 {path}").read().strip()
+                with open(path, 'rb') as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 4096))
+                    last_line = f.readlines()[-1].decode('utf-8', errors='replace').strip()
                 if not last_line:
                     continue
 
@@ -88,12 +100,17 @@ class MyCrackedPasswords(plugins.Plugin):
             logging.info(f"[mycracked-pw] {best_entry}")
         else:
             ui.set('status', '[STATUS] No cracked passwords yet')
+        self._cached_status = best_entry
 
     # ------------------------------------------------------------------ #
     #  Handshake hook                                                      #
     # ------------------------------------------------------------------ #
 
     def on_handshake(self, agent, filename, access_point, client_station):
+        now = time.time()
+        if now - self._last_update < 60:
+            return
+        self._last_update = now
         self._update_all()
 
     # ------------------------------------------------------------------ #
