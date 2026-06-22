@@ -11,7 +11,7 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.1'
+    __version__ = '1.0.2'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
@@ -105,11 +105,15 @@ class ohcapi(plugins.Plugin):
             handshake_dir      = config['bettercap']['handshakes']
 
             # Find .pcap files without an existing .22000 counterpart
-            all_pcaps = [
-                os.path.join(handshake_dir, f)
-                for f in os.listdir(handshake_dir)
-                if f.endswith('.pcap')
-            ]
+            try:
+                all_pcaps = [
+                    os.path.join(handshake_dir, f)
+                    for f in os.listdir(handshake_dir)
+                    if f.endswith('.pcap')
+                ]
+            except FileNotFoundError:
+                logging.error(f"[OHC] Handshake directory not found: {handshake_dir}")
+                return
 
             handshake_new = set(all_pcaps) - set(reported)
 
