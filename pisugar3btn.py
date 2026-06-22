@@ -7,7 +7,7 @@ import pwnagotchi.plugins as plugins
 
 class PiSugar3Button(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.1'
+    __version__ = '1.0.2'
     __license__ = 'GPL3'
     __description__ = (
         'Handles PiSugar 3 physical button with single, double, and long press support. '
@@ -15,8 +15,8 @@ class PiSugar3Button(plugins.Plugin):
     )
 
     I2C_ADDRESS = 0x57
-    BTN_REGISTER = 0x08
-    BTN_BIT      = 0x40
+    BTN_REGISTER = 0x04
+    BTN_BIT      = 0x02
 
     def __init__(self):
         self._bus = None
@@ -64,7 +64,6 @@ class PiSugar3Button(plugins.Plugin):
     def _poll_button(self):
         try:
             btn_reg = self._bus.read_byte_data(self.I2C_ADDRESS, self.BTN_REGISTER)
-            logging.debug(f"[pisugar3btn] BTN_REG=0x{btn_reg:02x} pressed={bool(btn_reg & self.BTN_BIT)}")
             pressed = (btn_reg & self.BTN_BIT) != 0
             now = time.time()
 
