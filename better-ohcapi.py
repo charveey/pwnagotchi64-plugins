@@ -11,7 +11,7 @@ from json.decoder import JSONDecodeError
 
 class ohcapi(plugins.Plugin):
     __author__ = 'charveey'
-    __version__ = '1.1.1'
+    __version__ = '1.1.3'
     __license__ = 'GPL3'
     __description__ = 'Uploads WPA/WPA2 handshakes to OnlineHashCrack.com using the new API (V2), no dashboard.'
 
@@ -58,15 +58,18 @@ class ohcapi(plugins.Plugin):
 
         logging.info("[OHC] Internet available, starting upload tasks.")
         self._run_tasks(agent)
-        self.last_run = time.time()
 
     # called when a new handshake is captured — upload immediately if possible
     def on_handshake(self, agent, filename, access_point, client_station):
         if not self.ready or self.lock.locked():
             return
+
+        current_time = time.time()
+        if current_time - self.last_run < self.options['sleep']:
+            logging.debug("[OHC] New handshake captured but cooldown active, skipping.")
+            return
         logging.info(f"[OHC] New handshake captured: {filename}, queuing upload.")
         self._run_tasks(agent)
-        self.last_run = time.time()
 
     # called when an epoch is over — used to retry uploads periodically
     def on_epoch(self, agent, epoch, epoch_data):
@@ -79,7 +82,6 @@ class ohcapi(plugins.Plugin):
 
         logging.debug("[OHC] Epoch trigger: checking for pending uploads.")
         self._run_tasks(agent)
-        self.last_run = time.time()
 
     # called before the plugin is unloaded
     def on_unload(self, ui):
@@ -91,6 +93,7 @@ class ohcapi(plugins.Plugin):
 
     def _run_tasks(self, agent):
         with self.lock:
+            self.last_run = time.time()
             try:
                 display = agent.view()
                 config  = agent.config()
