@@ -1,9 +1,4 @@
-import logging, os, pwnagotchi, requests, socket, traceback, shutil
-import pwnagotchi.ui.components as components
-import pwnagotchi.ui.view as view
-import pwnagotchi.ui.fonts as fonts
-import pwnagotchi.plugins as plugins
-from pwnagotchi.ui.components import Text
+import logging, os, pwnagotchi, requests, socket, traceback, shutil, toml, time
 from pwnagotchi import plugins
 from PIL import ImageOps, Image
 
@@ -12,11 +7,8 @@ class InetIcon(pwnagotchi.ui.components.Widget):
         super().__init__(xy, color)
         self.image_path = value
         self.invert = invert
-        self.image = Image.open(self.image_path)
-        if self.invert:
-            self.image = ImageOps.invert(Image.open(self.image_path).convert('L'))
-        else:
-            self.image = Image.open(self.image_path)
+        img = Image.open(self.image_path).convert('L')
+        self.image = ImageOps.invert(img) if self.invert else img
 
     def draw(self, canvas, drawer):
         if self.image:
@@ -28,7 +20,7 @@ class InetIcon(pwnagotchi.ui.components.Widget):
 
 class InternetConectionPlugin(plugins.Plugin):
     __author__ = 'neonlightning & charveey'
-    __version__ = '1.3.2'
+    __version__ = '1.4.0'
     __license__ = 'GPL3'
     __description__ = 'A plugin that displays the Internet connection status on the pwnagotchi display.'
     __help__ = """
@@ -42,6 +34,8 @@ class InternetConectionPlugin(plugins.Plugin):
     def __init__(self):
         super().__init__()
         self.current_state = False
+        self._last_check = 0
+        self._check_interval = 30
         self.icon_on_path  = os.path.join(os.path.dirname(os.path.realpath(__file__)), "internet-conection-on.png")
         self.icon_off_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "internet-conection-off.png")
         self.icon_path     = os.path.join(os.path.dirname(os.path.realpath(__file__)), "internet-conection.png")
@@ -60,9 +54,13 @@ class InternetConectionPlugin(plugins.Plugin):
             logging.error(f"[Internet Conection] Error copying file: {e}")
 
     def download_icon(self, url, save_path):
-        response = requests.get(url)
-        with open(save_path, 'wb') as file:
-            file.write(response.content)
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+        except Exception as e:
+            logging.error(f"[Internet Conection] Failed to download icon: {e}")
 
     def _is_internet_available(self):
         try:
@@ -73,22 +71,11 @@ class InternetConectionPlugin(plugins.Plugin):
 
     def invert(self):
         try:
-            with open("/etc/pwnagotchi/config.toml", "r") as f:
-                config = f.readlines()
-        except FileNotFoundError:
-            logging.warning("[Internet Conection] Config File not found")
+            config = toml.load("/etc/pwnagotchi/config.toml")
+            return config.get('ui', {}).get('invert', False)
+        except Exception as e:
+            logging.warning(f"[Internet Conection] Could not read config: {e}")
             return False
-        except EOFError:
-            pass
-        for line in config:
-            line = line.strip().strip('\n')
-            if "ui.invert = true" in line:
-                logging.debug("[Internet Conection] Screen Invert True")
-                return True
-            elif "ui.invert = false" in line:
-                logging.debug("[Internet Conection] Screen Invert False")
-                return False
-        return False
 
     def on_loaded(self):
         x = self.options.get('x', self.__defaults__['x'])
@@ -115,6 +102,10 @@ class InternetConectionPlugin(plugins.Plugin):
             logging.info(f"[Internet Conection] Error loading {e}")
 
     def on_ui_update(self, ui):
+        now = time.time()
+        if now - self._last_check < self._check_interval:
+            return
+        self._last_check = now
         is_connected = self._is_internet_available()
         if is_connected != self.current_state:
             self.current_state = is_connected
@@ -122,14 +113,11 @@ class InternetConectionPlugin(plugins.Plugin):
 
     def _swap_icon(self, is_connected):
         """Overwrite the active icon file with the on or off source."""
+        source_path = self.icon_on_path if is_connected else self.icon_off_path
         try:
-            source_path = self.icon_on_path if is_connected else self.icon_off_path
-            with open(source_path, 'rb') as source_file:
-                icon_data = source_file.read()
-            with open(self.icon_path, 'wb') as target_file:
-                target_file.write(icon_data)
+            shutil.copy(source_path, self.icon_path)
         except Exception as e:
-            logging.error(f"[Internet Conection] Error updating icon file: {e}")
+            logging.error(f"[Internet Conection] Error updating icon: {e}")
 
     def on_unload(self, ui):
         with ui._lock:
