@@ -533,7 +533,7 @@ class PiSugarServer:
 
 class PiSugar(plugins.Plugin):
     __author__ = "jayofelony"
-    __version__ = "1.2"
+    __version__ = "1.2.1"
     __license__ = "GPL3"
     __description__ = (
         "A plugin that will add a voltage indicator for the PiSugar batteries. "
@@ -783,7 +783,7 @@ class PiSugar(plugins.Plugin):
                 color=BLACK,
                 label="BAT",
                 value="0%",
-                position=(ui.width() / 2 + 5, 0),
+                position=(ui.width() / 2 + 25, 0),
                 label_font=fonts.Bold,
                 text_font=fonts.Medium,
             ),
