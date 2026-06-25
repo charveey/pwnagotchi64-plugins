@@ -10,7 +10,7 @@ from pwnagotchi.plugins import Plugin
 
 class BetterPwncrack(Plugin):
     __author__ = 'charveey'
-    __version__ = '1.0.1'
+    __version__ = '1.0.2'
     __license__ = 'GPL3'
     __description__ = 'Converts .pcap files to .hc22000 and uploads them to pwncrack.org when internet is available.'
 
@@ -131,15 +131,6 @@ class BetterPwncrack(Plugin):
                 logging.warning(f'[better-pwncrack] hcxpcapngtool timed out on {pcap_file}')
                 continue
 
-                if os.path.exists(tmp_hc_path) and os.path.getsize(tmp_hc_path) > 0:
-                    with open(tmp_hc_path, 'r') as f:
-                        hashes = [line.strip() for line in f if line.strip()]
-                    combined_hashes.extend(hashes)
-                    successfully_converted.append(pcap_file)
-                    logging.debug(f'[better-pwncrack] Converted {pcap_file} → {len(hashes)} hash(es).')
-                else:
-                    logging.debug(f'[better-pwncrack] No hashes extracted from {pcap_file}, skipping.')
-
             except FileNotFoundError:
                 logging.error('[better-pwncrack] hcxpcapngtool not found. Is it installed?')
                 return
@@ -147,6 +138,15 @@ class BetterPwncrack(Plugin):
                 if os.path.exists(tmp_hc_path):
                     os.remove(tmp_hc_path)
 
+        if os.path.exists(tmp_hc_path) and os.path.getsize(tmp_hc_path) > 0:
+            with open(tmp_hc_path, 'r') as f:
+                hashes = [line.strip() for line in f if line.strip()]
+            combined_hashes.extend(hashes)
+            successfully_converted.append(pcap_file)
+            logging.debug(f'[better-pwncrack] Converted {pcap_file} → {len(hashes)} hash(es).')
+        else:
+            logging.debug(f'[better-pwncrack] No hashes extracted from {pcap_file}, skipping.')
+        
         if not combined_hashes:
             logging.info('[better-pwncrack] No hashes extracted from new pcaps.')
             return
